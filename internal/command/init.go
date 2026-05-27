@@ -498,6 +498,7 @@ func (c *InitCommand) getProvidersFromConfig(ctx context.Context, config *config
 		},
 		QueryPackagesFailure: queryPackagesFailureCallback(&diags, ctx, inst.ProviderSource(), reqs),
 		QueryPackagesWarning: queryPackagesWarningCallback(&diags),
+		QueryPackagesSuccess: queryPackagesSuccessCallback(ctx, installerHook, &diags),
 		LinkFromCacheFailure: linkFromCacheFailureCallback(&diags),
 		FetchPackageFailure:  fetchPackageFailureCallback(&diags, reqs),
 		FetchPackageSuccess: func(provider addrs.Provider, version getproviders.Version, localDir string, authResult *getproviders.PackageAuthenticationResult) {
@@ -515,7 +516,6 @@ func (c *InitCommand) getProvidersFromConfig(ctx context.Context, config *config
 		ProvidersFetched:     providersFetchedCallback(view),
 	}
 	ctx = evts.OnContext(ctx)
-	inst.SetHook(installerHook)
 
 	mode := providercache.InstallNewProvidersOnly
 	if upgrade {
@@ -531,18 +531,18 @@ func (c *InitCommand) getProvidersFromConfig(ctx context.Context, config *config
 
 	// Determine which required providers are already downloaded, and download any
 	// new providers or newer versions of providers
-	configLocks, installErr := inst.EnsureProviderVersions(ctx, previousLocks, reqs, mode)
+	configLocks, err := inst.EnsureProviderVersions(ctx, previousLocks, reqs, mode)
 	if ctx.Err() == context.Canceled {
 		diags = diags.Append(fmt.Errorf("Provider installation was canceled by an interrupt signal."))
 		view.Diagnostics(diags) // TODO: Why is the output viewed here?
 		return true, nil, SafeInitActionInvalid, nil, diags
 	}
-	if installErr != nil {
-		// The errors captured in "installErr" should be redundant with what we
+	if err != nil {
+		// The errors captured in "err" should be redundant with what we
 		// received via the InstallerEvents callbacks above, so we'll
 		// just return those as long as we have some.
 		if !diags.HasErrors() {
-			diags = diags.Append(installErr)
+			diags = diags.Append(err)
 		}
 
 		return true, nil, SafeInitActionInvalid, nil, diags
@@ -686,6 +686,7 @@ func (c *InitCommand) getProvidersFromState(ctx context.Context, state *states.S
 		},
 		LinkFromCacheBegin:   linkFromCacheBeginCallback(view),
 		FetchPackageBegin:    fetchPackageBeginCallback(view),
+		QueryPackagesSuccess: queryPackagesSuccessCallback(ctx, installerHook, &diags),
 		QueryPackagesFailure: queryPackagesFailureCallback(&diags, ctx, inst.ProviderSource(), reqs),
 		QueryPackagesWarning: queryPackagesWarningCallback(&diags),
 		LinkFromCacheFailure: linkFromCacheFailureCallback(&diags),
@@ -695,7 +696,6 @@ func (c *InitCommand) getProvidersFromState(ctx context.Context, state *states.S
 		ProvidersFetched:     providersFetchedCallback(view),
 	}
 	ctx = evts.OnContext(ctx)
-	inst.SetHook(installerHook)
 
 	mode := providercache.InstallNewProvidersOnly
 
@@ -1156,6 +1156,24 @@ func queryPackagesFailureCallback(diags *tfdiags.Diagnostics, ctx context.Contex
 					provider.ForDisplay(), err, suggestion,
 				),
 			))
+		}
+	}
+}
+
+func queryPackagesSuccessCallback(ctx context.Context, hook *providerInstallerHook, diags *tfdiags.Diagnostics) func(provider addrs.Provider, selectedVersion getproviders.Version) {
+	return func(provider addrs.Provider, selectedVersion getproviders.Version) {
+		// For each needed provider, we will send the version
+		// and provider to the hook for policy evaluation.
+		// If the hook returns an error, we'll abort the installation.
+		// We do this before checking the lock file, so that we also
+		// evaluate policy for providers that are already installed.
+		result := hook.EvaluatePolicy(ctx, provider, selectedVersion.String())
+
+		// return a generic error here that the init command returns to the CLI.
+		// The detailed policy diagnostics are included in the policy results
+		// and will be formatted in the CLI output.
+		if len(result.Diagnostics) > 0 && result.Diagnostics.AsTerraformDiags().HasErrors() {
+			*diags = diags.Append(fmt.Errorf("Provider download failed due to policy violations. Please review other diagnostics for details."))
 		}
 	}
 }

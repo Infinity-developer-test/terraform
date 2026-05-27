@@ -17,7 +17,6 @@ import (
 	copydir "github.com/hashicorp/terraform/internal/copy"
 	"github.com/hashicorp/terraform/internal/depsfile"
 	"github.com/hashicorp/terraform/internal/getproviders"
-	"github.com/hashicorp/terraform/internal/policy"
 )
 
 // Installer is the main type in this package, representing a provider installer
@@ -59,10 +58,6 @@ type Installer struct {
 	// lifecycle for, and therefore does not need to worry about the
 	// installation of.
 	unmanagedProviderTypes map[addrs.Provider]struct{}
-
-	// hook is an optional hook whose methods may be called for each provider
-	// version that is being installed or upgraded.
-	hook InstallerHook
 }
 
 // NewInstaller constructs and returns a new installer with the given target
@@ -164,10 +159,6 @@ func (i *Installer) SetBuiltInProviderTypes(types []string) {
 // or versioning of these binaries.
 func (i *Installer) SetUnmanagedProviderTypes(types map[addrs.Provider]struct{}) {
 	i.unmanagedProviderTypes = types
-}
-
-func (i *Installer) SetHook(hook InstallerHook) {
-	i.hook = hook
 }
 
 // EnsureProviderVersions compares the given provider requirements with what
@@ -350,22 +341,6 @@ NeedProvider:
 			// we'll abort early, because subsequent operations against
 			// that context will fail immediately anyway.
 			return nil, err
-		}
-
-		if i.hook != nil {
-			// For each needed provider, we will send the version
-			// and provider to the hook for policy evaluation.
-			// If the hook returns an error, we'll abort the installation.
-			// We do this before checking the lock file, so that we also
-			// evaluate policy for providers that are already installed.
-			result := i.hook.EvaluatePolicy(ctx, provider, version.String())
-
-			// return a generic error here that the init command returns to the CLI.
-			// The detailed policy diagnostics are included in the policy results
-			// and will be formatted in the CLI output.
-			if len(result.Diagnostics) > 0 && result.Diagnostics.AsTerraformDiags().HasErrors() {
-				return nil, fmt.Errorf("Provider download failed due to policy violations. Please review other diagnostics for details.")
-			}
 		}
 
 		lock := locks.Provider(provider)
@@ -743,7 +718,9 @@ NeedProvider:
 	}
 
 	if len(errs) > 0 {
-		return locks, InstallerError{ProviderErrors: errs}
+		return locks, InstallerError{
+			ProviderErrors: errs,
+		}
 	}
 	return locks, nil
 }
@@ -803,10 +780,4 @@ func (err InstallerError) Error() string {
 		fmt.Fprintf(&b, "- %s: %s\n", addr, providerErr)
 	}
 	return strings.TrimSpace(b.String())
-}
-
-type InstallerHook interface {
-	// EvaluatePolicy is called for each provider version that is being installed
-	// or upgraded, allowing the caller to implement custom policy evaluation.
-	EvaluatePolicy(ctx context.Context, provider addrs.Provider, version string) policy.EvaluationResponse
 }
